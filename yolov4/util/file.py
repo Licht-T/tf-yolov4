@@ -27,6 +27,8 @@ import typing
 
 def get_ndarray_from_fd(fd: typing.BinaryIO, dtype, count: int) -> np.ndarray:
     data = np.fromfile(fd, dtype=dtype, count=count)
+
     if len(data) != count:
-        raise ValueError('Invalid model file.')
+        data = np.zeros((count,), dtype=dtype)
+
     return data

@@ -99,9 +99,6 @@ class Prediction(Model):
         self.path_aggregation_network_large_bbox.set_darknet_weights(fd)
         self._set_sequential_darknet_weights(self.sequential_large_bbox, fd)
 
-        if len(fd.read()) > 0:
-            raise ValueError('Invalid model file.')
-
     @staticmethod
     def _set_sequential_darknet_weights(sequential: Sequential, fd: typing.BinaryIO) -> None:
         layer: Convolution

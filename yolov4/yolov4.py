@@ -27,6 +27,7 @@ import tensorflow as tf
 import typing
 
 from .model import prediction
+from .model.loss import Loss
 from .util import file, image_util
 
 
@@ -50,6 +51,7 @@ class YOLOv4:
         self.input_size = 608
         self.strides = np.array([8, 16, 32])
         self.xy_scales = np.array([1.2, 1.1, 1.05])
+        self.batchsize = 64
 
         self.class_names = class_names
 
@@ -119,3 +121,9 @@ class YOLOv4:
             cv2.destroyWindow(window_name)
 
         return boxes, classes, scores
+
+    def compile(self):
+        self.model.compile('Adam', Loss(self.anchors, self.xy_scales, self.input_size, self.strides, self.batchsize))
+
+    def fit(self, x, y, epoch=1000):
+        self.model.fit(x, y, self.batchsize, epoch)
