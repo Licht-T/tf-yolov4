@@ -63,17 +63,23 @@ class YOLOv4:
 
     def load_darknet_weights(self, weights_file: str) -> None:
         with open(weights_file, 'rb') as fd:
-            file.get_ndarray_from_fd(fd, dtype=np.int32, count=5)
+            major, minor, revision = file.get_ndarray_from_fd(fd, dtype=np.int32, count=3)
+            if major * 10 + minor >= 2:
+                seen = file.get_ndarray_from_fd(fd, dtype=np.int64, count=1)[0]
+            else:
+                seen = file.get_ndarray_from_fd(fd, dtype=np.int32, count=1)[0]
+
             self.model.set_darknet_weights(fd)
 
     def predict(self, frame: np.ndarray, show=False) -> typing.Tuple[np.ndarray, np.ndarray, np.ndarray]:
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         resized_image = (image_util.resize_with_padding(rgb_frame, self.input_size) / 255)[np.newaxis, ...]
 
-        boxes, confidences, probabilities = self.model.predict(resized_image)
+        output = self.model.predict(resized_image)
+        boxes, _, confidences, class_probabilities = np.split(output, np.cumsum((4, 4, 1)), -1)
         boxes = boxes.reshape((-1, 4))
         confidences = confidences.reshape((-1,))
-        probabilities = probabilities.reshape((-1, len(self.class_names)))
+        class_probabilities = class_probabilities.reshape((-1, len(self.class_names)))
 
         height, width, _ = frame.shape
 
@@ -90,7 +96,7 @@ class YOLOv4:
         boxes[:, [0, 2]] *= width
         boxes[:, [1, 3]] *= height
 
-        scores = confidences[:, np.newaxis] * probabilities
+        scores = confidences[:, np.newaxis] * class_probabilities
 
         boxes, scores, classes, valid_detections = tf.image.combined_non_max_suppression(
             boxes.reshape((1, -1, 1, 4)), scores[np.newaxis, ...],

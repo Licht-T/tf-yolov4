@@ -83,9 +83,7 @@ class Prediction(Model):
         m = decode(medium_bbox, self.num_classes, self.anchors[1], self.xy_scales[1], self.input_size)
         l = decode(large_bbox, self.num_classes, self.anchors[2], self.xy_scales[2], self.input_size)
 
-        return [tf.concat((s[0], m[0], l[0]), 1),
-                tf.concat((s[1], m[1], l[1]), 1),
-                tf.concat((s[2], m[2], l[2]), 1)]
+        return tf.concat((s, m, l), 1)
 
     def set_darknet_weights(self, fd: typing.BinaryIO) -> None:
         self.darknet53.set_darknet_weights(fd)
@@ -111,14 +109,10 @@ class Prediction(Model):
             layer.set_darknet_weights(fd)
 
 
-@tf.function
 def decode(output, num_classes, anchor, xy_scale, input_size):
     batch_size = tf.shape(output)[0]
     output_size = tf.shape(output)[1]
-    tf.print(output_size)
     output = tf.reshape(output, (batch_size, output_size, output_size, 3, 5 + num_classes))
-
-    dxdys, dwdhs, confidences, probabilities = tf.split(output, (2, 2, 1, num_classes), -1)
 
     xy_grid = tf.meshgrid(tf.range(output_size), tf.range(output_size))
     xy_grid = tf.stack(xy_grid, -1)[:, :, tf.newaxis]
@@ -126,10 +120,17 @@ def decode(output, num_classes, anchor, xy_scale, input_size):
 
     xy_grid = tf.cast(xy_grid, tf.float32)
 
-    predicted_xy = (xy_scale * (tf.sigmoid(dxdys) - 0.5) + xy_grid + 0.5) / tf.cast(output_size, tf.float32)
-    predicted_wh = (tf.exp(dwdhs) * anchor) / tf.cast(input_size, tf.float32)
-    predicted_xywh = tf.concat([predicted_xy, predicted_wh], -1)
+    dxdy_activated = tf.sigmoid(output[:, :, :, :, :2])
+    dwdh = output[:, :, :, :, 2:4]
 
-    return [tf.reshape(predicted_xywh, (batch_size, -1, 4)),
-            tf.reshape(tf.sigmoid(confidences), (batch_size, -1, 1)),
-            tf.reshape(tf.sigmoid(probabilities), (batch_size, -1, num_classes))]
+    output = tf.concat(
+        [
+            (xy_scale * (dxdy_activated - 0.5) + xy_grid + 0.5) / tf.cast(output_size, tf.float32),
+            (tf.exp(output[:, :, :, :, 2:4]) * anchor) / tf.cast(input_size, tf.float32),
+            dxdy_activated,
+            dwdh,
+            tf.sigmoid(output[:, :, :, :, 4:]),
+        ], -1
+    )
+
+    return tf.reshape(output, (batch_size, -1, 4 + 4 + 1 + num_classes))
