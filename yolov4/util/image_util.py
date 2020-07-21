@@ -25,25 +25,17 @@ import cv2
 import numpy as np
 import typing
 
-from PIL import Image, ImageOps
+import tensorflow as tf
 
 
-def resize_with_padding(image: np.ndarray, size: int) -> np.ndarray:
-    height, width, _ = image.shape
-    ratio = size / max(height, width)
+@tf.function
+def preprocess(image: typing.Union[np.ndarray, tf.Tensor], size: int) -> tf.Tensor:
+    return tf.image.resize_with_pad(image, size, size) / 255.0
 
-    height, width = round(height * ratio), round(width * ratio)
-    image = cv2.resize(image, (width, height))
 
-    dw = size - width
-    dh = size - height
-    dw2 = dw // 2
-    dh2 = dh // 2
-    padding = (dw2, dh2, dw - dw2, dh - dh2)
-
-    pil_image = ImageOps.expand(Image.fromarray(image), padding)
-
-    return np.array(pil_image, dtype=np.uint8)
+@tf.function
+def load_image(path: str) -> tf.Tensor:
+    return tf.image.decode_image(tf.io.read_file(path), 3)
 
 
 def draw_bounding_boxes(image: np.ndarray, bboxes: np.ndarray, classes: np.ndarray,

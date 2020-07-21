@@ -106,6 +106,7 @@ class Prediction(Model):
             layer.set_darknet_weights(fd)
 
 
+@tf.function
 def decode(output, num_classes, anchor, xy_scale, input_size):
     batch_size = tf.shape(output)[0]
     output_size = tf.shape(output)[1]

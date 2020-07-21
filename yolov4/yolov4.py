@@ -51,7 +51,8 @@ class YOLOv4:
         self.input_size = 608
         self.strides = np.array([8, 16, 32])
         self.xy_scales = np.array([1.2, 1.1, 1.05])
-        self.batchsize = 64
+        self.batchsize = 2
+        self.steps_per_epoch = 100
 
         self.class_names = class_names
 
@@ -73,9 +74,10 @@ class YOLOv4:
 
             self.model.set_darknet_weights(fd)
 
-    def predict(self, frame: np.ndarray, show=False) -> typing.Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        resized_image = (image_util.resize_with_padding(rgb_frame, self.input_size) / 255)[np.newaxis, ...]
+    def predict(self, frame: typing.Union[np.ndarray, tf.Tensor], show: bool = False) \
+            -> typing.Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        frame = tf.convert_to_tensor(frame)
+        resized_image = image_util.preprocess(frame, self.input_size)[tf.newaxis, ...]
 
         output = self.model.predict(resized_image)
         boxes, _, confidences, class_probabilities = np.split(output, np.cumsum((4, 4, 1)), -1)
@@ -83,7 +85,7 @@ class YOLOv4:
         confidences = confidences.reshape((-1,))
         class_probabilities = class_probabilities.reshape((-1, len(self.class_names)))
 
-        height, width, _ = frame.shape
+        height, width, _ = frame.get_shape().as_list()
 
         ratio = max(width, height) / min(width, height)
         i = 1 if width > height else 0
@@ -111,6 +113,8 @@ class YOLOv4:
         classes = classes.numpy()[0].astype(np.int)
 
         if show:
+            frame = cv2.cvtColor(frame.numpy(), cv2.COLOR_RGB2BGR)
+
             window_name = 'result'
             output_frame = image_util.draw_bounding_boxes(frame, boxes, classes, scores, self.class_names)
             cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
@@ -125,5 +129,87 @@ class YOLOv4:
     def compile(self):
         self.model.compile('Adam', Loss(self.anchors, self.xy_scales, self.input_size, self.strides, self.batchsize))
 
-    def fit(self, x, y, epoch=1000):
-        self.model.fit(x, y, self.batchsize, epoch)
+    def fit(self, image_paths: typing.List[str], label_paths: typing.List[str], epochs: int = 1000):
+        image_path_ds = tf.data.Dataset.from_tensor_slices(image_paths)
+        label_path_ds = tf.data.Dataset.from_tensor_slices(label_paths)
+
+        image_label_path_ds = tf.data.Dataset.zip((image_path_ds, label_path_ds))
+
+        image_label_ds = image_label_path_ds.map(
+            lambda x, y: _load_and_preprocess_image_and_label(len(self.class_names), self.input_size, x, y),
+            tf.data.experimental.AUTOTUNE
+        ).repeat().batch(self.batchsize)
+
+        self.model.fit(image_label_ds, epochs=epochs, steps_per_epoch=self.steps_per_epoch)
+
+
+@tf.function
+def _decode_csv(line: tf.Tensor):
+    return tf.io.decode_csv(line, [0.0, 0.0, 0.0, 0.0, 0.0], ' ')
+
+
+@tf.function
+def _load_and_preprocess_image_and_label(num_classes: int, input_size: int, image_path: str, label_path: str) \
+        -> typing.Tuple[tf.Tensor, tf.Tensor]:
+    img = image_util.load_image(image_path)
+    height = tf.shape(img)[0]
+    width = tf.shape(img)[1]
+
+    labels = tf.zeros((0, 5))
+    for e in tf.data.TextLineDataset(label_path).map(_decode_csv):
+        x = tf.stack(e)[tf.newaxis, :]
+        labels = tf.concat([labels, x], 0)
+
+    n_labels = tf.shape(labels)[0]
+
+    label_index = tf.range(n_labels)[:, tf.newaxis]
+    labels_converted = tf.zeros((n_labels, 5 + num_classes), np.float32)
+    ones = tf.ones((n_labels,))
+
+    labels_converted = tf.tensor_scatter_nd_update(
+        labels_converted,
+        tf.concat([label_index, tf.broadcast_to(4, (n_labels, 1))], -1),
+        ones
+    )
+    labels_converted = tf.tensor_scatter_nd_update(
+        labels_converted,
+        tf.concat([label_index, (5 + tf.cast(labels[:, 0], tf.int32))[:, tf.newaxis]], -1),
+        ones
+    )
+
+    bboxes = labels[:, 1:]
+    x = bboxes[:, 0]
+    y = bboxes[:, 1]
+    w = bboxes[:, 2]
+    h = bboxes[:, 3]
+
+    ratio = tf.cast(tf.maximum(width, height) / tf.minimum(width, height), tf.float32)
+    if width > height:
+        y = (y - 0.5) / ratio + 0.5
+        h /= ratio
+    else:
+        x = (x - 0.5) / ratio + 0.5
+        w /= ratio
+
+    labels_converted = tf.tensor_scatter_nd_update(
+        labels_converted,
+        tf.concat([label_index, tf.broadcast_to(0, (n_labels, 1))], -1),
+        x
+    )
+    labels_converted = tf.tensor_scatter_nd_update(
+        labels_converted,
+        tf.concat([label_index, tf.broadcast_to(1, (n_labels, 1))], -1),
+        y
+    )
+    labels_converted = tf.tensor_scatter_nd_update(
+        labels_converted,
+        tf.concat([label_index, tf.broadcast_to(2, (n_labels, 1))], -1),
+        w
+    )
+    labels_converted = tf.tensor_scatter_nd_update(
+        labels_converted,
+        tf.concat([label_index, tf.broadcast_to(3, (n_labels, 1))], -1),
+        h
+    )
+
+    return image_util.preprocess(img, input_size), labels_converted
