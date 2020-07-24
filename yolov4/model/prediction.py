@@ -85,10 +85,12 @@ class Prediction(Model):
 
         return tf.concat((s, m, l), 1)
 
-    def set_darknet_weights(self, fd: typing.BinaryIO) -> None:
+    def set_darknet_weights(self, fd: typing.BinaryIO, backbone_only: bool = False) -> None:
         self.darknet53.set_darknet_weights(fd)
-
         self.spatial_pyramid_pooling.set_darknet_weights(fd)
+
+        if backbone_only:
+            return
 
         self.path_aggregation_network_small_bbox.set_darknet_weights(fd)
         self._set_sequential_darknet_weights(self.sequential_small_bbox, fd)

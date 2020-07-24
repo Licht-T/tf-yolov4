@@ -32,7 +32,7 @@ from .util import file, image_util
 
 
 class YOLOv4:
-    def __init__(self, class_names: typing.List[str]):
+    def __init__(self, num_classes: int):
         self.anchors = np.array([
             [
                 [12, 16],
@@ -53,18 +53,20 @@ class YOLOv4:
         self.xy_scales = np.array([1.2, 1.1, 1.05])
         self.batchsize = 2
         self.steps_per_epoch = 100
+        self.learning_rate = 0.001
+        self.burn_in_steps = 1000
 
-        self.class_names = class_names
+        self.num_classes = num_classes
 
         tf.keras.backend.clear_session()
         input = tf.keras.layers.Input([self.input_size, self.input_size, 3])
-        self.model = prediction.Prediction(len(self.class_names), self.anchors, self.xy_scales, self.input_size)
+        self.model = prediction.Prediction(self.num_classes, self.anchors, self.xy_scales, self.input_size)
         self.model(input)
 
     def load_weights(self, weights_path: str) -> None:
         self.model.load_weights(weights_path).expect_partial()
 
-    def load_darknet_weights(self, weights_file: str) -> None:
+    def load_darknet_weights(self, weights_file: str, backbone_only: bool = False) -> None:
         with open(weights_file, 'rb') as fd:
             major, minor, revision = file.get_ndarray_from_fd(fd, dtype=np.int32, count=3)
             if major * 10 + minor >= 2:
@@ -72,7 +74,7 @@ class YOLOv4:
             else:
                 seen = file.get_ndarray_from_fd(fd, dtype=np.int32, count=1)[0]
 
-            self.model.set_darknet_weights(fd)
+            self.model.set_darknet_weights(fd, backbone_only)
 
     def predict(self, frame: typing.Union[np.ndarray, tf.Tensor], show: bool = False) \
             -> typing.Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -83,7 +85,7 @@ class YOLOv4:
         boxes, _, confidences, class_probabilities = np.split(output, np.cumsum((4, 4, 1)), -1)
         boxes = boxes.reshape((-1, 4))
         confidences = confidences.reshape((-1,))
-        class_probabilities = class_probabilities.reshape((-1, len(self.class_names)))
+        class_probabilities = class_probabilities.reshape((-1, self.num_classes))
 
         height, width, _ = frame.get_shape().as_list()
 
@@ -109,14 +111,17 @@ class YOLOv4:
             clip_boxes=False
         )
         boxes = boxes.numpy()[0]
-        scores = scores.numpy()[0]
-        classes = classes.numpy()[0].astype(np.int)
+        cond = np.where(boxes[:, 2] * boxes[:, 3] > .0)
+
+        boxes = boxes[cond]
+        scores = scores.numpy()[0][cond]
+        classes = classes.numpy()[0].astype(np.int)[cond]
 
         if show:
             frame = cv2.cvtColor(frame.numpy(), cv2.COLOR_RGB2BGR)
 
             window_name = 'result'
-            output_frame = image_util.draw_bounding_boxes(frame, boxes, classes, scores, self.class_names)
+            output_frame = image_util.draw_bounding_boxes(frame, boxes, classes, scores, self.num_classes)
             cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
             cv2.imshow(window_name, output_frame)
 
@@ -136,11 +141,24 @@ class YOLOv4:
         image_label_path_ds = tf.data.Dataset.zip((image_path_ds, label_path_ds))
 
         image_label_ds = image_label_path_ds.map(
-            lambda x, y: _load_and_preprocess_image_and_label(len(self.class_names), self.input_size, x, y),
+            lambda x, y: _load_and_preprocess_image_and_label(self.num_classes, self.input_size, x, y),
             tf.data.experimental.AUTOTUNE
-        ).repeat().batch(self.batchsize)
+        ).shuffle(10, reshuffle_each_iteration=True).repeat().batch(self.batchsize)
 
-        self.model.fit(image_label_ds, epochs=epochs, steps_per_epoch=self.steps_per_epoch)
+        self.model.fit(
+            image_label_ds, epochs=epochs, steps_per_epoch=self.steps_per_epoch,
+            callbacks=[
+                tf.keras.callbacks.LearningRateScheduler(
+                    lambda e, lr: _get_current_learning_rate(e, self.learning_rate, self.burn_in_steps, self.steps_per_epoch)
+                )
+            ],
+        )
+
+
+def _get_current_learning_rate(current_epoch, max_lr, burn_in_steps, steps_per_epoch):
+    lr = max_lr * tf.math.pow(tf.math.minimum(1.0, (current_epoch + 1)/(burn_in_steps / steps_per_epoch)), 4)
+    tf.print(tf.strings.format('Current learning rate: {}', (lr,)))
+    return lr
 
 
 @tf.function
@@ -162,26 +180,25 @@ def _load_and_preprocess_image_and_label(num_classes: int, input_size: int, imag
 
     n_labels = tf.shape(labels)[0]
 
-    label_index = tf.range(n_labels)[:, tf.newaxis]
-    labels_converted = tf.zeros((n_labels, 5 + num_classes), np.float32)
+    label_indices = tf.range(n_labels)[:, tf.newaxis]
     ones = tf.ones((n_labels,))
 
-    labels_converted = tf.tensor_scatter_nd_update(
-        labels_converted,
-        tf.concat([label_index, tf.broadcast_to(4, (n_labels, 1))], -1),
+    labels_conf_and_probs = tf.tensor_scatter_nd_update(
+        tf.zeros((n_labels, 1 + num_classes), np.float32),
+        tf.concat([label_indices, tf.broadcast_to(0, (n_labels, 1))], -1),
         ones
     )
-    labels_converted = tf.tensor_scatter_nd_update(
-        labels_converted,
-        tf.concat([label_index, (5 + tf.cast(labels[:, 0], tf.int32))[:, tf.newaxis]], -1),
+    labels_conf_and_probs = tf.tensor_scatter_nd_update(
+        labels_conf_and_probs,
+        tf.concat([label_indices, (1 + tf.cast(labels[:, 0:1], tf.int32))], -1),
         ones
     )
 
     bboxes = labels[:, 1:]
-    x = bboxes[:, 0]
-    y = bboxes[:, 1]
-    w = bboxes[:, 2]
-    h = bboxes[:, 3]
+    x = bboxes[:, 0:1]
+    y = bboxes[:, 1:2]
+    w = bboxes[:, 2:3]
+    h = bboxes[:, 3:4]
 
     ratio = tf.cast(tf.maximum(width, height) / tf.minimum(width, height), tf.float32)
     if width > height:
@@ -191,25 +208,4 @@ def _load_and_preprocess_image_and_label(num_classes: int, input_size: int, imag
         x = (x - 0.5) / ratio + 0.5
         w /= ratio
 
-    labels_converted = tf.tensor_scatter_nd_update(
-        labels_converted,
-        tf.concat([label_index, tf.broadcast_to(0, (n_labels, 1))], -1),
-        x
-    )
-    labels_converted = tf.tensor_scatter_nd_update(
-        labels_converted,
-        tf.concat([label_index, tf.broadcast_to(1, (n_labels, 1))], -1),
-        y
-    )
-    labels_converted = tf.tensor_scatter_nd_update(
-        labels_converted,
-        tf.concat([label_index, tf.broadcast_to(2, (n_labels, 1))], -1),
-        w
-    )
-    labels_converted = tf.tensor_scatter_nd_update(
-        labels_converted,
-        tf.concat([label_index, tf.broadcast_to(3, (n_labels, 1))], -1),
-        h
-    )
-
-    return image_util.preprocess(img, input_size), labels_converted
+    return image_util.preprocess(img, input_size), tf.concat([x, y, w, h, labels_conf_and_probs], -1)
