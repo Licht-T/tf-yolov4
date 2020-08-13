@@ -66,7 +66,7 @@ class PathAggregationNetworkSmallBoundingBox(Model):
 
         self.conv_residual3 = Convolution(256, 1, activation=Activation.LEAKY_RELU)
         self.layers_for_weight_load.append(self.conv_residual3)
-        self.up_sampling3 = layers.UpSampling2D()
+        self.up_sampling3 = layers.UpSampling2D(interpolation='bilinear')
         self.conv_residual2 = Convolution(256, 1, activation=Activation.LEAKY_RELU)
         self.layers_for_weight_load.append(self.conv_residual2)
         self.concat23 = layers.Concatenate(-1)
@@ -83,7 +83,7 @@ class PathAggregationNetworkSmallBoundingBox(Model):
 
         self.conv_residual23 = Convolution(128, 1, activation=Activation.LEAKY_RELU)
         self.layers_for_weight_load.append(self.conv_residual23)
-        self.up_sampling23 = layers.UpSampling2D()
+        self.up_sampling23 = layers.UpSampling2D(interpolation='bilinear')
         self.conv_residual1 = Convolution(128, 1, activation=Activation.LEAKY_RELU)
         self.layers_for_weight_load.append(self.conv_residual1)
         self.concat123 = layers.Concatenate(-1)

@@ -39,10 +39,9 @@ def load_image(path: str) -> tf.Tensor:
 
 
 def draw_bounding_boxes(image: np.ndarray, bboxes: np.ndarray, classes: np.ndarray,
-                        scores: np.ndarray, class_names: typing.List[str]) -> np.ndarray:
+                        scores: np.ndarray, num_classes: int) -> np.ndarray:
     image = np.copy(image)
 
-    num_classes = len(class_names)
     colors = [tuple(xx) for xx in cv2.applyColorMap(
         np.array([int(255.0 * x / num_classes) for x in range(num_classes)], dtype=np.uint8).reshape((1, -1)),
         cv2.COLORMAP_RAINBOW

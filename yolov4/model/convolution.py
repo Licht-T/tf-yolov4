@@ -64,7 +64,8 @@ class Convolution(Layer):
         use_bias = activation is None
         self._conv = layers.Conv2D(
             self.filters, self.kernel_size, strides,
-            padding=padding, use_bias=use_bias
+            padding=padding, use_bias=use_bias,
+            kernel_initializer='he_normal',
         )
 
         self.sequential.add(self._conv)

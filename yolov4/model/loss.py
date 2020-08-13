@@ -30,126 +30,110 @@ class Loss(tf.keras.losses.Loss):
         super(Loss, self).__init__()
 
         self.input_size = input_size
-        self.xy_scales = xy_scales
-        self.strides = strides
-        self.output_sizes = self.input_size // self.strides
-        self.batch_size = batch_size
-        self.batch_index = tf.range(batch_size)[:, tf.newaxis]
-        self.num_anchor_types = anchors.shape[1]
+        self.batch_index = tf.range(batch_size)[:, tf.newaxis, tf.newaxis]
 
-        tmp = np.pad(self.output_sizes, (1, 0)).cumsum()[:, np.newaxis]
-        self.output_ranges = np.concatenate([tmp[:-1, :], tmp[1:, :]], axis=1)
+        self.anchor_grid_xywhs = []
+        self.output_size_vector = []
+        self.xy_scale_vector = []
+        self.xy_grids = []
 
-        self.anchor_grid_xywhs_list = []
+        output_sizes = self.input_size // strides
 
-        for anchor, xy_scale, output_size in zip(anchors, self.xy_scales, self.output_sizes):
+        for anchor, xy_scale, output_size in zip(anchors, xy_scales, output_sizes):
+            vector_shape = (3 * output_size ** 2,)
+            self.output_size_vector.append(np.full(vector_shape, output_size, np.float32))
+            self.xy_scale_vector.append(np.full(vector_shape, xy_scale, np.float32))
+
             xy_grid = np.meshgrid(range(output_size), range(output_size))
             xy_grid = np.stack(xy_grid, -1)[:, :, np.newaxis]
             xy_grid = np.tile(xy_grid, [1, 1, 3, 1]).astype(np.float32)
+            self.xy_grids.append(xy_grid.reshape((-1, 2)).astype(np.float32))
 
             xy = (xy_grid + 0.5 * (1 - xy_scale)) / output_size
             wh = np.tile(anchor / self.input_size, (output_size, output_size, 1, 1))
+            self.anchor_grid_xywhs.append(np.concatenate([xy, wh], -1).reshape((-1, 4)))
 
-            xywh = tf.convert_to_tensor(np.concatenate([xy, wh], -1).reshape((-1, 4)))
+        self.output_size_vector = tf.concat(self.output_size_vector, 0)[:, tf.newaxis]
+        self.xy_scale_vector = tf.concat(self.xy_scale_vector, 0)[:, tf.newaxis]
 
-            self.anchor_grid_xywhs_list.append(tf.broadcast_to(xywh, (self.batch_size, *tf.shape(xywh))))
+        self.xy_grids = tf.concat(self.xy_grids, 0)
+
+        self.anchor_grid_xywhs = tf.concat(self.anchor_grid_xywhs, 0)
+        self.anchor_grid_xywhs = \
+            tf.broadcast_to(self.anchor_grid_xywhs[tf.newaxis, ...], (batch_size, *tf.shape(self.anchor_grid_xywhs)))
 
     def call(self, y_true, y_pred):
-        split_sizes = self.num_anchor_types * (self.output_sizes ** 2)
+        truth_xywhs = y_true[..., :4]
+        truth_confidences = y_true[..., 4]
+        truth_class_probs = y_true[..., 5:]
 
-        predicted_xywhs_sml = tf.split(y_pred[:, :, :4], split_sizes, 1)
-        predicted_xy_probs_sml = tf.split(y_pred[:, :, 4:6], split_sizes, 1)
-        predicted_wh_exponents_sml = tf.split(y_pred[:, :, 6:8], split_sizes, 1)
-        predicted_confidences_sml = tf.split(y_pred[:, :, 8], split_sizes, 1)
-        predicted_class_probs_sml = tf.split(y_pred[:, :, 9:], split_sizes, 1)
+        predicted_xywhs = y_pred[..., :4]
+        predicted_xy_probs = y_pred[..., 4:6]
+        predicted_wh_exponents = y_pred[..., 6:8]
+        predicted_confidences = y_pred[..., 8]
+        predicted_class_probs = y_pred[..., 9:]
 
-        truth_xywhs = y_true[:, :, :4]
-        truth_confidences = y_true[:, :, 4]
-        truth_class_probs = y_true[:, :, 5:]
+        grid_args_for_best_iou = tf.argmax(iou(truth_xywhs, self.anchor_grid_xywhs), -1, tf.int32)[..., tf.newaxis]
+        grid_args_for_best_iou = tf.concat([
+            tf.broadcast_to(self.batch_index, tf.shape(grid_args_for_best_iou)),
+            grid_args_for_best_iou
+        ], -1)
 
-        loss_xys = 0.
-        loss_whs = 0.
-        loss_confidences = 0.
-        loss_probabilities = 0.
+        output_sizes = tf.gather_nd(self.output_size_vector, grid_args_for_best_iou[..., 1:])
+        xy_scales = tf.gather_nd(self.xy_scale_vector, grid_args_for_best_iou[..., 1:])
+        xy_grids = tf.gather_nd(self.xy_grids[..., :2], grid_args_for_best_iou[..., 1:])
+        truth_xy_probs = (truth_xywhs[..., :2] * output_sizes - xy_grids - 0.5) / xy_scales + 0.5
+        predicted_xy_probs = tf.gather_nd(predicted_xy_probs, grid_args_for_best_iou)
 
-        for i, output_size in enumerate(self.output_sizes):
-            predicted_xywhs = predicted_xywhs_sml[i]
-            predicted_xy_probs = predicted_xy_probs_sml[i]
-            predicted_wh_exponents = predicted_wh_exponents_sml[i]
-            predicted_confidences = predicted_confidences_sml[i]
-            predicted_class_probs = predicted_class_probs_sml[i]
-            anchor_grid_xywhs = self.anchor_grid_xywhs_list[i]
-            xy_scale = self.xy_scales[i]
+        truth_wh_exponents = tf.math.log(
+            truth_xywhs[..., 2:] / tf.gather_nd(self.anchor_grid_xywhs[..., 2:], grid_args_for_best_iou)
+        )
+        predicted_wh_exponents = tf.gather_nd(predicted_wh_exponents, grid_args_for_best_iou)
 
-            anchor_grid_args_for_best_iou_to_truth = tf.argmax(iou(truth_xywhs, anchor_grid_xywhs), 2, tf.int32)
-            anchor_grid_args_for_best_iou_to_truth = anchor_grid_args_for_best_iou_to_truth[..., tf.newaxis]
-            anchor_grid_args_for_best_iou_to_truth = tf.concat([
-                tf.broadcast_to(self.batch_index[:, :, tf.newaxis], tf.shape(anchor_grid_args_for_best_iou_to_truth)),
-                anchor_grid_args_for_best_iou_to_truth
-            ], -1)
+        confidences_mask = tf.tensor_scatter_nd_update(
+            tf.cast(0.5 > tf.reduce_max(iou(predicted_xywhs, truth_xywhs), -1), tf.float32),
+            grid_args_for_best_iou,
+            tf.ones(tf.shape(grid_args_for_best_iou)[:-1])
+        )
+        truth_confidences = confidences_mask * tf.tensor_scatter_nd_update(
+            tf.zeros(tf.shape(predicted_confidences)),
+            grid_args_for_best_iou,
+            truth_confidences
+        )
+        predicted_confidences = confidences_mask * predicted_confidences
 
-            iou_over_predicted_and_truth = iou(predicted_xywhs, truth_xywhs)
-            truth_args_for_best_iou_to_predicted = tf.argmax(iou_over_predicted_and_truth, 2, tf.int32)
-            truth_args_for_best_iou_to_predicted = truth_args_for_best_iou_to_predicted[..., tf.newaxis]
-            truth_args_for_best_iou_to_predicted = tf.concat([
-                tf.broadcast_to(self.batch_index[:, :, tf.newaxis], tf.shape(truth_args_for_best_iou_to_predicted)),
-                truth_args_for_best_iou_to_predicted
-            ], -1)
-            confidences_mask = tf.cast(0.7 > tf.reduce_max(iou_over_predicted_and_truth, 2), tf.float32)
-            confidences_mask = tf.tensor_scatter_nd_update(
-                confidences_mask,
-                anchor_grid_args_for_best_iou_to_truth,
-                tf.ones(tf.shape(anchor_grid_args_for_best_iou_to_truth)[:-1])
-            )
+        predicted_class_probs = tf.gather_nd(predicted_class_probs, grid_args_for_best_iou)
 
-            truth_xy_probs = \
-                truth_xywhs[:, :, :2] - tf.gather_nd(predicted_xywhs, anchor_grid_args_for_best_iou_to_truth)[:, :, :2]
-            truth_xy_probs *= tf.cast(output_size, tf.float32)
-            truth_xy_probs -= 0.5
-            truth_xy_probs /= xy_scale
-            truth_xy_probs += 0.5
-            predicted_xy_probs = tf.gather_nd(predicted_xy_probs, anchor_grid_args_for_best_iou_to_truth)
+        loss_xys = tf.keras.backend.binary_crossentropy(truth_xy_probs, predicted_xy_probs)
+        loss_whs = tf.math.squared_difference(truth_wh_exponents, predicted_wh_exponents)
+        loss_confidences = tf.keras.backend.binary_crossentropy(truth_confidences, predicted_confidences)
+        loss_class_probs = tf.keras.backend.binary_crossentropy(truth_class_probs, predicted_class_probs)
 
-            truth_whs = tf.math.log(
-                truth_xywhs[:, :, 2:] * self.input_size
-                / tf.gather_nd(anchor_grid_xywhs[:, :, 2:], anchor_grid_args_for_best_iou_to_truth)
-                + 1e-16
-            )
-            predicted_whs = tf.gather_nd(predicted_wh_exponents, anchor_grid_args_for_best_iou_to_truth)
-
-            truth_confidences = tf.gather_nd(truth_confidences, truth_args_for_best_iou_to_predicted) * confidences_mask
-            predicted_confidences = predicted_confidences * confidences_mask
-
-            predicted_class_probs = tf.gather_nd(predicted_class_probs, anchor_grid_args_for_best_iou_to_truth)
-
-            loss_xys += tf.keras.losses.binary_crossentropy(truth_xy_probs, predicted_xy_probs)
-            loss_whs += tf.reduce_sum(tf.keras.losses.mse(truth_whs, predicted_whs), 1)
-            loss_confidences += tf.keras.losses.binary_crossentropy(truth_confidences, predicted_confidences)
-            loss_probabilities += tf.keras.losses.binary_crossentropy(truth_class_probs, predicted_class_probs)
-
-        loss = loss_xys + loss_whs / 2 + loss_confidences + loss_probabilities
-
-        return loss
+        return (tf.reduce_mean(tf.reduce_sum(loss_xys, axis=(1, 2)))
+                + tf.reduce_mean(tf.reduce_sum(loss_whs, axis=(1, 2)))
+                + tf.reduce_mean(tf.reduce_sum(loss_confidences, axis=(1,)))
+                + tf.reduce_mean(tf.reduce_sum(loss_class_probs, axis=(1, 2))))
 
 
+@tf.function
 def iou(xywhs1, xywhs2):
-    half_whs1 = xywhs1[:, :, 2:] / 2
-    half_whs2 = xywhs2[:, :, 2:] / 2
+    half_whs1 = xywhs1[..., 2:] / 2
+    half_whs2 = xywhs2[..., 2:] / 2
 
-    top_left1 = xywhs1[:, :, :2] - half_whs1
-    top_left2 = xywhs2[:, :, :2] - half_whs2
-    bottom_right1 = xywhs1[:, :, :2] + half_whs1
-    bottom_right2 = xywhs2[:, :, :2] + half_whs2
+    top_left1 = xywhs1[..., :2] - half_whs1
+    top_left2 = xywhs2[..., :2] - half_whs2
+    bottom_right1 = xywhs1[..., :2] + half_whs1
+    bottom_right2 = xywhs2[..., :2] + half_whs2
 
-    intersection_top_left = tf.maximum(top_left1[:, :, tf.newaxis, :], top_left2[:, tf.newaxis, :, :])
-    intersection_bottom_right = tf.minimum(bottom_right1[:, :, tf.newaxis, :], bottom_right2[:, tf.newaxis, :, :])
+    intersection_top_left = tf.maximum(top_left1[..., tf.newaxis, :], top_left2[..., tf.newaxis, :, :])
+    intersection_bottom_right = tf.minimum(bottom_right1[..., tf.newaxis, :], bottom_right2[..., tf.newaxis, :, :])
 
-    one = tf.math.reduce_prod(bottom_right1 - top_left1, 2)
-    two = tf.math.reduce_prod(bottom_right2 - top_left2, 2)
+    one = tf.math.reduce_prod(bottom_right1 - top_left1, -1)
+    two = tf.math.reduce_prod(bottom_right2 - top_left2, -1)
 
-    condition = tf.reduce_prod(tf.cast(intersection_top_left < intersection_bottom_right, tf.float32), 3)
-    i = tf.math.reduce_prod(intersection_bottom_right - intersection_top_left, 3) * condition
-    u = one[:, :, tf.newaxis] + two[:, tf.newaxis, :]
+    condition = tf.reduce_prod(tf.cast(intersection_top_left < intersection_bottom_right, tf.float32), -1)
+    i = tf.math.reduce_prod(intersection_bottom_right - intersection_top_left, -1) * condition
+    u = one[..., tf.newaxis] + two[..., tf.newaxis, :]
     u -= i
 
     return i / u
