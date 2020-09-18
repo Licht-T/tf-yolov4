@@ -35,6 +35,10 @@ VERSION = 'v1.0.1'
 
 class YOLOv4:
     def __init__(self, num_classes: int = 80):
+        """
+        Constructor.
+        :param num_classes: # of classes to be predicted. The default value is 80 (MS-COCO).
+        """
         self.anchors = np.array([
             [
                 [12, 16],
@@ -60,12 +64,28 @@ class YOLOv4:
 
         self.num_classes = num_classes
 
-        tf.keras.backend.clear_session()
-        input = tf.keras.layers.Input([self.input_size, self.input_size, 3])
+        self.model = None
+
+        self.init_model()
+
+    def init_model(self) -> None:
+        """
+        Generate the Keras model. Automatically called in the constructor.
+        Call this and re-generate the model after a model initialization parameter has changed.
+        :return: None
+        """
         self.model = prediction.Prediction(self.num_classes, self.anchors, self.xy_scales, self.input_size)
-        self.model(input)
+        self.model(tf.keras.layers.Input([self.input_size, self.input_size, 3]))
 
     def load_weights(self, weights_path: str = None) -> None:
+        """
+        Load a Keras weight file.
+        :param weights_path: Weight file path. The default is None.
+               If weights_path == None and self.num_classes == 80: Pre-trained COCO model is retrieved.
+               If weights_path == None and self.num_classes != 80: Pre-trained backbone and SPP model is retrieved.
+               Otherwise: weights_path file is loaded.
+        :return: None
+        """
         if weights_path is None:
             base_url = f'https://github.com/Licht-T/tf-yolov4/releases/download/{VERSION}'
             if self.num_classes == 80:
@@ -84,6 +104,11 @@ class YOLOv4:
         self.model.load_weights(weights_path)
 
     def load_darknet_weights(self, weights_file: str) -> None:
+        """
+        Load a Darknet weight file.
+        :param weights_path: Weight file path.
+        :return: None
+        """
         with open(weights_file, 'rb') as fd:
             major, minor, revision = file.get_ndarray_from_fd(fd, dtype=np.int32, count=3)
             if major * 10 + minor >= 2:
@@ -94,10 +119,21 @@ class YOLOv4:
             self.model.set_darknet_weights(fd)
 
     def save_weights(self, path: str) -> None:
+        """
+        Save the current weight.
+        :param path: Weight path to be saved.
+        :return: None
+        """
         self.model.save_weights(path)
 
     def predict(self, frame: typing.Union[np.ndarray, tf.Tensor], debug: bool = False) \
             -> typing.Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Image prediction method.
+        :param frame: (H, W, 3)-shaped RGB-image to be predicted (uint8 np.ndarray or tf.Tensor).
+        :param debug: If True, generates the image with predicted bounding-boxes into the current directory.
+        :return: A tuple of predicted bounding-boxes, its class IDs and its score.
+        """
         frame = tf.convert_to_tensor(frame)
         resized_image = image_util.preprocess(frame, self.input_size)[tf.newaxis, ...]
 
@@ -144,10 +180,30 @@ class YOLOv4:
 
         return boxes, classes, scores
 
-    def compile(self):
+    def compile(self) -> None:
+        """
+        Compile the model for training.
+        :return: None
+        """
         self.model.compile('Adam', Loss(self.anchors, self.xy_scales, self.input_size, self.strides, self.batchsize))
 
-    def fit(self, image_paths: typing.List[str], label_paths: typing.List[str], epochs: int = 1000):
+    def fit(
+            self, image_paths: typing.List[str], label_paths: typing.List[str], epochs: int = 1000,
+            callbacks: typing.List[tf.keras.callbacks.Callback] = None
+    ) -> tf.keras.callbacks.History:
+        """
+        :param image_paths: List of training image file paths.
+               image_paths[i] should be the image file path for the label text path label_paths[i].
+        :param label_paths: List of training label text file paths.
+               label_paths[i] should be the label text file path for the image file path image_paths[i].
+               Each label text file has the Darknet style annotations.
+        :param epochs: # of training epochs.
+        :param callbacks: List of tf.keras.callbacks.Callback for training.
+        :return: tf.keras.callbacks.History object.
+        """
+        if callbacks is None:
+            callbacks = []
+
         image_path_ds = tf.data.Dataset.from_tensor_slices(image_paths)
         label_path_ds = tf.data.Dataset.from_tensor_slices(label_paths)
 
@@ -158,13 +214,15 @@ class YOLOv4:
             tf.data.experimental.AUTOTUNE
         ).shuffle(10, reshuffle_each_iteration=True).repeat().batch(self.batchsize)
 
-        self.model.fit(
+        return self.model.fit(
             image_label_ds, epochs=epochs, steps_per_epoch=self.steps_per_epoch,
             callbacks=[
                 tf.keras.callbacks.LearningRateScheduler(
-                    lambda e, lr: _get_current_learning_rate(e, self.learning_rate, self.burn_in_steps, self.steps_per_epoch)
+                    lambda e, lr: _get_current_learning_rate(
+                        e, self.learning_rate, self.burn_in_steps, self.steps_per_epoch
+                    )
                 )
-            ],
+            ] + callbacks,
         )
 
 
