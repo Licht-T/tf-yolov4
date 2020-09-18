@@ -21,7 +21,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
-import cv2
+import PIL.Image
 import numpy as np
 import tensorflow as tf
 import typing
@@ -30,9 +30,11 @@ from .model import prediction
 from .model.loss import Loss
 from .util import file, image_util
 
+VERSION = 'v1.0.0'
+
 
 class YOLOv4:
-    def __init__(self, num_classes: int):
+    def __init__(self, num_classes: int = 80):
         self.anchors = np.array([
             [
                 [12, 16],
@@ -63,10 +65,25 @@ class YOLOv4:
         self.model = prediction.Prediction(self.num_classes, self.anchors, self.xy_scales, self.input_size)
         self.model(input)
 
-    def load_weights(self, weights_path: str) -> None:
-        self.model.load_weights(weights_path).expect_partial()
+    def load_weights(self, weights_path: str = None) -> None:
+        if weights_path is None:
+            base_url = f'https://github.com/Licht-T/tf-yolov4/releases/download/{VERSION}'
+            if self.num_classes == 80:
+                weights_path = tf.keras.utils.get_file(
+                    f'yolov4_pretrained_coco_{VERSION}.h5',
+                    f'{base_url}/yolov4_pretrained_coco.h5',
+                    cache_subdir='tf-yolov4'
+                )
+            else:
+                weights_path = tf.keras.utils.get_file(
+                    f'yolov4_pretrained_backbone_and_spp_only_{VERSION}.h5',
+                    f'{base_url}/yolov4_pretrained_backbone_and_spp_only.h5',
+                    cache_subdir='tf-yolov4'
+                )
 
-    def load_darknet_weights(self, weights_file: str, backbone_only: bool = False) -> None:
+        self.model.load_weights(weights_path)
+
+    def load_darknet_weights(self, weights_file: str) -> None:
         with open(weights_file, 'rb') as fd:
             major, minor, revision = file.get_ndarray_from_fd(fd, dtype=np.int32, count=3)
             if major * 10 + minor >= 2:
@@ -74,9 +91,12 @@ class YOLOv4:
             else:
                 seen = file.get_ndarray_from_fd(fd, dtype=np.int32, count=1)[0]
 
-            self.model.set_darknet_weights(fd, backbone_only)
+            self.model.set_darknet_weights(fd)
 
-    def predict(self, frame: typing.Union[np.ndarray, tf.Tensor], show: bool = False) \
+    def save_weights(self, path: str) -> None:
+        self.model.save_weights(path)
+
+    def predict(self, frame: typing.Union[np.ndarray, tf.Tensor], debug: bool = False) \
             -> typing.Tuple[np.ndarray, np.ndarray, np.ndarray]:
         frame = tf.convert_to_tensor(frame)
         resized_image = image_util.preprocess(frame, self.input_size)[tf.newaxis, ...]
@@ -117,17 +137,10 @@ class YOLOv4:
         scores = scores.numpy()[0][cond]
         classes = classes.numpy()[0].astype(np.int)[cond]
 
-        if show:
-            frame = cv2.cvtColor(frame.numpy(), cv2.COLOR_RGB2BGR)
-
-            window_name = 'result'
-            output_frame = image_util.draw_bounding_boxes(frame, boxes, classes, scores, self.num_classes)
-            cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-            cv2.imshow(window_name, output_frame)
-
-            while cv2.waitKey(10) & 0xFF != ord('q'):
-                pass
-            cv2.destroyWindow(window_name)
+        if debug:
+            im = PIL.Image.fromarray(frame.numpy())
+            im = image_util.draw_bounding_boxes(im, boxes, classes, scores)
+            im.save('./output.png')
 
         return boxes, classes, scores
 

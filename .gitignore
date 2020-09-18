@@ -2,10 +2,9 @@ __pycache__
 .eggs
 build
 dist
-data
 *.egg-info
-data
 .idea
 *.txt
 *.weights
 *.conv.137
+*.h5

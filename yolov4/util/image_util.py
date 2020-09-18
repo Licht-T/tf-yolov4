@@ -21,7 +21,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
-import cv2
+import PIL.Image
+import PIL.ImageDraw
+import PIL.ImageColor
 import numpy as np
 import typing
 
@@ -38,17 +40,23 @@ def load_image(path: str) -> tf.Tensor:
     return tf.image.decode_image(tf.io.read_file(path), 3)
 
 
-def draw_bounding_boxes(image: np.ndarray, bboxes: np.ndarray, classes: np.ndarray,
-                        scores: np.ndarray, num_classes: int) -> np.ndarray:
-    image = np.copy(image)
+def draw_bounding_boxes(im: PIL.Image, bboxes: np.ndarray, classes: np.ndarray,
+                        scores: np.ndarray) -> PIL.Image:
+    im = im.copy()
+    num_classes = len(set(classes))
+    class_to_color_id = {cls: i for i, cls in enumerate(set(classes))}
 
-    colors = [tuple(xx) for xx in cv2.applyColorMap(
-        np.array([int(255.0 * x / num_classes) for x in range(num_classes)], dtype=np.uint8).reshape((1, -1)),
-        cv2.COLORMAP_RAINBOW
-    ).reshape((-1, 3)).tolist()]
+    colors = [PIL.ImageColor.getrgb(f'hsv({int(360 * x / num_classes)},100%,100%)') for x in range(num_classes)]
+
+    draw = PIL.ImageDraw.Draw(im)
 
     for bbox, cls, score in zip(bboxes, classes, scores):
-        color = colors[cls]
-        cv2.rectangle(image, tuple(bbox[:2].astype(np.int)), tuple(bbox[2:].astype(np.int)), color, 2)
+        color = colors[class_to_color_id[cls]]
+        draw.rectangle((*bbox.astype(np.int64),), outline=color)
 
-    return image
+        text = f'{cls}: {int(100 * score)}%'
+        text_w, text_h = draw.textsize(text)
+        draw.rectangle((bbox[0], bbox[1], bbox[0] + text_w, bbox[1] + text_h), fill=color, outline=color)
+        draw.text((bbox[0], bbox[1]), text, fill=(0, 0, 0))
+
+    return im
