@@ -71,7 +71,7 @@ class Convolution(Layer):
         self.sequential.add(self._conv)
 
         if activation is not None:
-            self._batch_normalization = layers.BatchNormalization()
+            self._batch_normalization = layers.BatchNormalization(epsilon=1e-5)
             self.sequential.add(self._batch_normalization)
             self.sequential.add(activation.value())
 
