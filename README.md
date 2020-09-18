@@ -20,9 +20,9 @@ yo.load_weights(weights_path=None)
 img = np.array(PIL.Image.open('./data/sf.jpg'))
 
 # The image with predicted bounding-boxes is created if `debug=True`
-yo.predict(img, debug=True)
+boxes, classes, scores = yo.predict(img, debug=True)
 ```
-![output](./data/output.png)
+![output](https://raw.githubusercontent.com/Licht-T/tf-yolov4/master/data/output.png)
 
 ## TODO
 * [x] Prediction

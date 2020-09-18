@@ -30,7 +30,7 @@ from .model import prediction
 from .model.loss import Loss
 from .util import file, image_util
 
-VERSION = 'v1.0.0'
+VERSION = 'v1.0.1'
 
 
 class YOLOv4:
