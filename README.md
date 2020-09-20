@@ -1,5 +1,6 @@
 # tf-yolov4
 [![PyPI version](https://badge.fury.io/py/tf-yolov4.svg)](https://badge.fury.io/py/tf-yolov4)
+![Upload Python Package](https://github.com/Licht-T/tf-yolov4/workflows/Upload%20Python%20Package/badge.svg)
 
 [YOLOv4](https://arxiv.org/abs/2004.10934) implementation with Tensorflow 2.
 
